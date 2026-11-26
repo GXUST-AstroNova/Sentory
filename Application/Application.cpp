@@ -1,70 +1,88 @@
 #include "Application.h"
-#include "fdcan.h"
-#include "hfdcan_bsp.h"
-#include "usart.h"
-#include "vofa.h"
-#include "dm_models.hpp"
-#include "m3508.hpp"
-#include "sbus.h"
-#include "OmniChassis.hpp"
-#include "PowerLimit/PowerLimit.hpp"
-namespace Application {
-    vofa debug(&huart1);
-    Sbus receiver(&huart5);
-    M3508 front_left_motor(&hfdcan1, 1);
-    M3508 front_right_motor(&hfdcan1, 2);
-    M3508 back_left_motor(&hfdcan1, 4);
-    M3508 back_right_motor(&hfdcan1, 3);
-    OmniChassis chassis(front_left_motor, back_left_motor, back_right_motor, front_right_motor, {1, 1, 1, 1});
+#include "RoleApps.hpp"
+#include "BoardConfig/BootConfig.hpp"
+#include "tim.h"
+#include "ws2812.h"
+
+using board_config::Role;
+using board_config::Status;
+
+// Startup diagnostics, readable by symbol from a debugger.
+extern "C" {
+volatile std::uint8_t g_board_role = static_cast<std::uint8_t>(Role::Unknown);
+volatile std::int32_t g_board_config_status = static_cast<std::int32_t>(Status::NotConfigured);
+volatile std::uint32_t g_board_config_sequence = 0;
 }
+
 namespace {
-    // SBUS channel numbers on the transmitter are one-based.
-    constexpr uint8_t forward_channel = 2 - 1;
-    constexpr uint8_t lateral_channel = 4 - 1;
-    constexpr uint8_t yaw_channel = 1 - 1;
-    constexpr float max_linear_mps = 5.0f;
-    constexpr float max_yaw_rad_s = 5.0f;
-    constexpr uint32_t receiver_timeout_ms = 100;
+Role active_role = Role::Unknown;
+bool boot_attempted = false;
+Ws2812 led(&hspi6, Ws2812::Config{});
 
-    void updateChassisTarget() {
-        RcSnapshot frame;
-        Application::receiver.Get_Snapshot(frame);
-        if (!frame.ready || frame.update_count == 0 || frame.failsafe || frame.frame_lost ||
-            frame.count <= lateral_channel || HAL_GetTick() - frame.last_update_tick >= receiver_timeout_ms) {
-            Application::chassis.SetTarget(0, 0, 0);
-            return;
-        }
-
-        Application::chassis.SetTarget( frame.Normalised(forward_channel) * max_linear_mps,
-                                      -frame.Normalised(lateral_channel) * max_linear_mps,
-                                      -frame.Normalised(yaw_channel) * max_yaw_rad_s);
+void updateLed() {
+    if (!led.Is_Ready()) return;
+    const auto now = HAL_GetTick();
+    LedColor desired{};
+    switch (active_role) {
+    case Role::Chassis: desired.g = 255; break;
+    case Role::Gimbal: desired.b = 255; break;
+    case Role::Unknown: desired.r = (now / 250U) % 2U == 0 ? 255 : 0; break;
     }
+    static LedColor submitted{}; // Init submits black.
+    if (desired.r == submitted.r && desired.g == submitted.g && desired.b == submitted.b)
+        return;
+    led.Set_Color(desired);
+    if (led.Show(now)) submitted = desired;
+}
 }
 
 void Application_Init() {
-    using namespace Application;
-    if (!can_bus::start(&hfdcan1) || !can_bus::start(&hfdcan2) || !can_bus::start(&hfdcan3)) {
-        Error_Handler();
+    if (boot_attempted) return;
+    boot_attempted = true;
+    const auto config = board_config::LoadBootConfig();
+    g_board_config_sequence = config.sequence;
+    g_board_role = static_cast<std::uint8_t>(config.role);
+    g_board_config_status = static_cast<std::int32_t>(config.status);
+    (void)led.Init();
+
+    switch (config.role) {
+    case Role::Chassis:
+        if (!ChassisApp::Init()) {
+            Error_Handler();
+            return;
+        }
+        break;
+    case Role::Gimbal:
+        if (!GimbalApp::Init()) {
+            Error_Handler();
+            return;
+        }
+        break;
+    case Role::Unknown:
+        updateLed();
         return;
     }
-    if (!front_left_motor.init() || !back_left_motor.init() ||
-        !back_right_motor.init() || !front_right_motor.init() || receiver.Init() != 0) {
-        Error_Handler();
-        return;
-    }
-    chassis.Init();
+
+    active_role = config.role;
+    updateLed();
+    __HAL_TIM_CLEAR_FLAG(&htim7, TIM_FLAG_UPDATE);
+    if (HAL_TIM_Base_Start_IT(&htim7) != HAL_OK) Error_Handler();
 }
 
-void Application_Loop() {}
+void Application_Loop() {
+    updateLed();
+    switch (active_role) {
+    case Role::Chassis: ChassisApp::Loop(); break;
+    case Role::Gimbal: GimbalApp::Loop(); break;
+    case Role::Unknown: break;
+    }
+}
 
-void Application_Timer_Callback(TIM_HandleTypeDef *htim) {
-    if (htim->Instance == TIM7) {
-        updateChassisTarget();
-        Application::chassis.Tick();
-        (void)power_limit::Apply(&Application::front_left_motor, &Application::back_left_motor,
-                                 &Application::back_right_motor, &Application::front_right_motor, {});
-        DmMotor::sendAll();
-        DjiMotorGroup::sendAll();
-        Application::debug.send();
+void Application_Timer_Callback(TIM_HandleTypeDef* timer) {
+    if (timer->Instance != TIM7) return;
+    switch (active_role) {
+    case Role::Chassis: ChassisApp::Tick(); break;
+    case Role::Gimbal: GimbalApp::Tick(); break;
+    case Role::Unknown: break;
     }
 }
