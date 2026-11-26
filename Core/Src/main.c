@@ -125,11 +125,6 @@ int main(void)
   MX_CRC_Init();
   /* USER CODE BEGIN 2 */
   Application_Init();
-  __HAL_TIM_CLEAR_FLAG(&htim7, TIM_FLAG_UPDATE);
-  if (HAL_TIM_Base_Start_IT(&htim7) != HAL_OK)
-  {
-    Error_Handler();
-  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
