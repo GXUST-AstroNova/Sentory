@@ -68,6 +68,11 @@ bool M3508::setCurrentRaw(int32_t current_raw) noexcept {
     return true;
 }
 
+int16_t M3508::pendingCurrentRaw() const noexcept {
+    IrqGuard guard;
+    return enabled_ ? current_target_ : 0;
+}
+
 bool M3508::disable() noexcept {
     IrqGuard guard;
     current_target_ = 0;

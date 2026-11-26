@@ -29,6 +29,7 @@ public:
     bool setTorque(float torque_nm) noexcept override;
     // 写入 C620 原始电流目标，越界限幅到 ±16384（±20 A），由 sendAll() 发送。
     bool setCurrentRaw(int32_t current_raw) noexcept;
+    [[nodiscard]] int16_t pendingCurrentRaw() const noexcept;
     bool disable() noexcept override;
     bool enable() noexcept override;
     bool resetAccumulatedAngle() noexcept;
