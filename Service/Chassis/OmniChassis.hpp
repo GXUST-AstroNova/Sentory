@@ -13,10 +13,11 @@ public:
                 std::array<std::int8_t, 4> motor_signs);
     void Init();
     void Tick(); // Call at 1 kHz, before submitting the motor group commands.
+    // Right-handed body frame: +x forward, +y left, +z up; positive yaw is CCW from above.
     bool SetTarget(float vx_mps, float vy_mps, float wz_rad_s);
-    PositionalPID vx_pid_{1, 0, 0, 10, dt_s_, 100};
-    PositionalPID vy_pid_{1, 0, 0, 10, dt_s_, 100};
-    PositionalPID wz_pid_{1, 0, 0, 10, dt_s_, 100};
+    PositionalPID vx_pid_{50, 80, 0, 10, dt_s_, 100};
+    PositionalPID vy_pid_{50, 80, 0, 10, dt_s_, 100};
+    PositionalPID wz_pid_{30, 60, 0, 7, dt_s_, 100};
 private:
     static constexpr float center_distance_m_ = 0.24328f;
     static constexpr float wheel_radius_m_ = 0.075f;
