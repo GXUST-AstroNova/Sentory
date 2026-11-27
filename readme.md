@@ -1,18 +1,18 @@
-# Dm_02_Bsp_V2
+# Sentory（Dm_02_Bsp_V2）
 
-基于 STM32H723 的嵌入式 BSP 工程，使用 STM32CubeMX 生成外设初始化代码，并以 C/C++ 实现电机、传感器和常用控制组件。工程通过 CMake 和 Ninja 构建。
+Sentory 是基于 STM32H723VGT6 的嵌入式机器人固件工程。外设初始化由 STM32CubeMX 管理，硬件驱动、服务组件和应用以 C/C++ 实现，使用 CMake 和 Ninja 构建。
 
 ## 仓库定位与提交范围
 
-本仓库是项目的**代码基线**，用于维护可复用的基础能力。仅应向本仓库提交公共支持库、电机支持库和传感器支持库，以及这些公共组件所必需的配置与维护内容。具体机器人、赛季或任务专用的业务逻辑和应用代码应在各自的项目中维护；现有应用代码用于示例与调试。
+本仓库维护可复用的底层支持能力，并包含用于联调的应用骨架。电机、传感器、控制工具和服务组件可供其他应用复用；具体机器人或任务的业务逻辑应按项目需要维护。提交应用改动时请同时确认它不会误导使用者把未完成的示例当作可直接上机的控制程序。
+
 ## 功能概览
 
-- 电机：达妙电机及大疆 M3508 驱动，基于 FDCAN 收发。
-- 传感器与输入：BMI088 IMU、FlySky SBUS 接收器。
-- 其他硬件：W25Q Flash、WS2812 LED、PWM 蜂鸣器，以及 UART、FDCAN 基础接口。
-- 控制与调试：PID、滑模控制组件、VOFA 数据发送，以及 Fusion 姿态融合库。
+- 硬件驱动：达妙电机、大疆 M3508、BMI088 IMU、FlySky SBUS、W25Q Flash、WS2812 LED 和 PWM 蜂鸣器。
+- 通信与服务：UART/FDCAN BSP、板间消息编解码与收发、板级启动角色配置、全向底盘组件和 M3508 功率限制。
+- 控制与调试：PID、滑模控制、轨迹滑模、VOFA 数据发送，以及 Fusion 姿态融合库。
 
-具体接口和总线配置见 [硬件接口说明](Hardware/README.md)，分层设计见 [设计思路](设计思路.md)。各模块的实际启用情况请以应用代码和 CubeMX 配置为准。
+具体接口和总线配置见 [硬件接口说明](Hardware/README.md)，分层设计见 [设计思路](设计思路.md)。各驱动的接入说明另见 [控制器串口接入约定](Hardware/Controller/README.md)、[蜂鸣器说明](Hardware/Buzzer/README.md) 和 [LED 说明](Hardware/Led/README.md)。模块是否在应用中启用，以应用代码和 CubeMX 配置为准。
 
 ## 板上外设与配置状态
 
@@ -43,11 +43,11 @@
 
 ## 获取与构建
 
-克隆时初始化 Fusion 子模块：
+克隆时初始化 Fusion 和 Boost.PFR 子模块：
 
 ```bash
 git clone --recurse-submodules <仓库地址>
-cd Dm_02_Bsp_V2
+cd Sentory
 ```
 
 已有工作区可执行：
@@ -68,13 +68,13 @@ cmake --build --preset Debug
 ## 工程结构
 
 ```text
-Application/     应用初始化、主循环与定时回调
-Hardware/        电机、传感器和其他硬件接口
-Service/         服务组件（如 VOFA）
-Tools/           控制算法及第三方 Fusion 库
+Application/     角色应用、主循环与定时回调
+Hardware/        电机、传感器、板级接口及其他硬件驱动
+Service/         启动配置、板间通信、底盘和功率限制等组件
+Tools/           控制算法及 Fusion、Boost.PFR 子模块
 Core/            CubeMX 生成的核心代码
-Drivers/         STM32 HAL 等驱动
-Middlewares/     中间件
+Drivers/         STM32 HAL、CMSIS 等驱动
+Middlewares/     STM32 中间件
 USB_DEVICE/      USB 设备代码
 cmake/           工具链与 CubeMX 构建配置
 Dm_02_Bsp_V2.ioc CubeMX 工程配置
@@ -82,9 +82,11 @@ Dm_02_Bsp_V2.ioc CubeMX 工程配置
 
 ## 使用与调试
 
-应用入口位于 [Application.cpp](Application/Application.cpp)。当前示例初始化 FDCAN1、FDCAN2、FDCAN3，启用一台达妙电机，并初始化一台 M3508；TIM7 回调中以 1 kHz 更新控制目标、发送电机命令和 VOFA 数据。实际接线、电机 ID、总线参数和控制逻辑应按设备调整。
+应用入口位于 [Application.cpp](Application/Application.cpp)。启动时固件从 W25Q Flash 的双槽配置中读取板卡角色，选择底盘或云台应用；未知或无效角色不会启动角色应用。底盘和云台应用目前是联调骨架，主循环中的业务控制尚未完成，不应视作可直接上机的完整机器人程序。
 
-**上电前请检查应用中的电机使能和控制代码、接线及供电。** 电机接口、帧格式、初始化顺序和实机验收要点见 [硬件接口说明](Hardware/README.md)。
+底盘应用目前启动 FDCAN1/2/3，初始化 M3508 和只读观察模式的达妙电机，建立底盘与板间通信服务，并在 TIM7 回调中调用底盘、功率限制和电机发送流程。云台应用目前启动三条 FDCAN 总线并初始化板间通信服务；其主循环仍为空。实际控制目标、配置写入工具和设备初始化流程需按硬件与任务继续完善。
+
+**上电前请确认板卡角色配置、应用逻辑、总线模式、电机使能、接线和供电；首次验证时应确保执行器不会意外动作。** 电机接口、帧格式、初始化顺序和实机验收要点见 [硬件接口说明](Hardware/README.md)。
 
 外设配置可通过根目录的 `.ioc` 文件在 STM32CubeMX 中查看或修改。重新生成代码后，请检查生成结果和用户代码区，并重新构建验证。
 
