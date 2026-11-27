@@ -6,6 +6,9 @@
 
 #include "bmi088.h"
 #include "dma_buffer.hpp"
+#include "irq_guard.hpp"
+
+#include <numbers>
 
 namespace {
 
@@ -19,21 +22,23 @@ namespace {
 //
 // 放在文件作用域而不是类成员：GCC 不允许给非静态数据成员加 section 属性。
 // 用匿名命名空间得到内部链接，不会与其它翻译单元冲突。
-// Init() 为 SPI2 的活动实例独占这些 DMA 缓冲，析构时释放。
+// init() 为 SPI2 的活动实例独占这些 DMA 缓冲，析构时释放。
 // ===========================================================================
-RAM_D2_SECTION uint8_t g_tx_acc[Bmi088::kAccTotal]{};    ///< 加速度计 MOSI（只有 [0] 有效）
-RAM_D2_SECTION uint8_t g_rx_acc[Bmi088::kAccTotal]{};    ///< 加速度计 MISO，DMA 目标
-RAM_D2_SECTION uint8_t g_tx_gyro[Bmi088::kGyroTotal]{};  ///< 陀螺仪 MOSI（只有 [0] 有效）
-RAM_D2_SECTION uint8_t g_rx_gyro[Bmi088::kGyroTotal]{};  ///< 陀螺仪 MISO，DMA 目标
+constexpr uint16_t kAccTotal = 20U;
+constexpr uint16_t kGyroTotal = 7U;
+RAM_D2_SECTION uint8_t g_tx_acc[kAccTotal]{};    ///< 加速度计 MOSI（只有 [0] 有效）
+RAM_D2_SECTION uint8_t g_rx_acc[kAccTotal]{};    ///< 加速度计 MISO，DMA 目标
+RAM_D2_SECTION uint8_t g_tx_gyro[kGyroTotal]{};  ///< 陀螺仪 MOSI（只有 [0] 有效）
+RAM_D2_SECTION uint8_t g_rx_gyro[kGyroTotal]{};  ///< 陀螺仪 MISO，DMA 目标
 
 // SPI2 上只有这一颗 BMI088（工程里也只有一个全局 Bmi088 实例），
 // 中断里用这个指针把完成事件转回驱动实例。
-Bmi088 *g_active_imu = nullptr;
+Bmi088 *volatile g_active_imu = nullptr;
 
 } // namespace
 
 // ---------------------------------------------------------------------------
-// SPI2 DMA 完成/错误回调：只做链式推进（加速度计 -> 陀螺仪），解析与提交在 Process()
+// SPI2 DMA 完成/错误回调：只做链式推进（加速度计 -> 陀螺仪），解析与提交在 process()
 //
 // HAL 的完成路径（核对过 stm32h7xx_hal_spi.c）：
 //   SPI_DMATransmitReceiveCplt() 置 EOT 中断 -> SPI_IRQHandler() 在 EOT 分支里
@@ -41,14 +46,14 @@ Bmi088 *g_active_imu = nullptr;
 // 所以回调触发时总线已关闭、末位已移出，此时释放片选、立刻发起下一笔 DMA 都是安全的。
 // ---------------------------------------------------------------------------
 extern "C" void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi) {
-    if ((g_active_imu != nullptr) && (hspi != nullptr) && (hspi->Instance == SPI2)) {
-        g_active_imu->On_Spi_Complete(hspi);
+    if ((g_active_imu != nullptr) && (hspi == g_active_imu->hspi_)) {
+        g_active_imu->onComplete();
     }
 }
 
 extern "C" void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
-    if ((g_active_imu != nullptr) && (hspi != nullptr) && (hspi->Instance == SPI2)) {
-        g_active_imu->On_Spi_Error(hspi);
+    if (g_active_imu && hspi == g_active_imu->hspi_ && hspi->ErrorCode != HAL_SPI_ERROR_NONE) {
+        g_active_imu->onError();
     }
 }
 
@@ -90,7 +95,7 @@ constexpr uint32_t kCsToggleDelayMs      = 1U;
  * “In order to allow for the correct internal synchronisation of data written to the
  *  BMI088, a wait time of at least 2 µs (normal mode) or 1000 µs (suspend mode)
  *  must be followed.”
- * HAL_Delay 最小粒度 1 ms，远大于 2 µs 但绝对安全；只在 Init() 里用几次，代价可忽略。
+ * HAL_Delay 最小粒度 1 ms，远大于 2 µs 但绝对安全；只在 init() 里用几次，代价可忽略。
  */
 constexpr uint32_t kWriteIdleDelayMs     = 1U;
 constexpr uint32_t kGyroSoftResetDelayMs = 30U;
@@ -102,7 +107,7 @@ constexpr uint8_t kAccConfBwpNormal = 0xA0U;
 // GYRO_BANDWIDTH(0x10)：低 3 位是 ODR/滤波档位（手册 p.39 §5.5.6）。
 // bit7 是【只读位、恒为 1】，手册脚注明确它没有功能、可以忽略 —— 不是“正常模式”位。
 // 因此写入时只写低 3 位即可。
-constexpr uint8_t kGyroBwMask    = 0x02U;
+constexpr uint8_t kGyroBwMask    = 0x07U;
 constexpr uint8_t kGyroBwResetHi = 0x80U;   ///< 只读位，写入无效果；写 1 仅为与复位值一致
 
 // 加速度计灵敏度表，下标 = ACC_RANGE 码值
@@ -133,13 +138,15 @@ Bmi088::Bmi088(SPI_HandleTypeDef *hspi) noexcept
 Bmi088::Bmi088(SPI_HandleTypeDef *hspi, const Config &cfg) noexcept
     : hspi_(hspi), cfg_(cfg) {
     // 构造函数里刻意不碰 GPIO：全局对象可能在 MX_GPIO_Init() 之前被构造。
-    // 片选状态统一由 Init() 第一步接管。
+    // 片选状态统一由 init() 第一步接管。
 }
 
 Bmi088::~Bmi088() {
     if (g_active_imu == this) {
         g_active_imu = nullptr;
-        if (xfer_ == Xfer::Wait) (void)HAL_SPI_Abort(hspi_);
+        if (xfer_ != Xfer::Idle && xfer_ != Xfer::Complete) {
+            (void)HAL_SPI_Abort(hspi_);
+        }
         deselectAccel();
         deselectGyro();
     }
@@ -294,12 +301,17 @@ int8_t Bmi088::readGyroId() noexcept {
 
 // -------------------- 基类接口 --------------------
 
-int8_t Bmi088::Init() {
-    if (g_active_imu == this && Is_Ready()) return 0;
-    setReady(false);
+bool Bmi088::init() {
+    if (g_active_imu == this) return true;
+    if (!dmaReady() || hspi_->Instance != SPI2 || g_active_imu != nullptr ||
+        !cfg_.accel_cs_port || !cfg_.gyro_cs_port) {
+        return false;
+    }
 
-    if (!dmaReady() || hspi_->Instance != SPI2 || g_active_imu != nullptr) {
-        return -1;
+    const uint8_t acc_range = static_cast<uint8_t>(cfg_.accel_range);
+    const uint8_t gyr_range = static_cast<uint8_t>(cfg_.gyro_range);
+    if (acc_range > 3U || gyr_range > 4U) {
+        return false;
     }
 
     // 1) 两个片选都释放，等上电稳定（手册 p.14 §4.1：POR 后加速度计需要 ts_up ≤ 1 ms）
@@ -318,7 +330,7 @@ int8_t Bmi088::Init() {
 
     // 3) 加速度计软复位（此时器件已在 SPI 模式，命令才会被识别）
     if (writeAccel(kAccSoftReset, kSoftResetCmd) != 0) {
-        return -1;
+        return false;
     }
     HAL_Delay(kAccSoftResetDelayMs);
 
@@ -328,12 +340,12 @@ int8_t Bmi088::Init() {
     //    软复位会重新初始化接口（p.14 §4.1），复位事务末尾的 CSB1 上升沿又切了一次
     //    SPI，所以这里必须再丢一次 —— 少了这一步，第 5 步读到的就是这个无效值。
     if (discardAccelFirstRead() != 0) {
-        return -1;
+        return false;
     }
 
     // 5) 加速度计 chip id 自检（必须是「第二次读」，即丢弃 dummy 之后的那次）
     if (readAccelId() != 0 || accel_chip_id_ != kAccChipIdValue) {
-        return -1;
+        return false;
     }
 
     // 6) 顺带取一次错误寄存器（手册 p.26 §5.3.2），纯诊断，不影响成功判定
@@ -341,69 +353,56 @@ int8_t Bmi088::Init() {
 
     // 7) 加速度计上电 + 量程/ODR
     if (writeAccel(kAccPwrCtrl, 0x04U) != 0) {   // accel on
-        return -1;
+        return false;
     }
     HAL_Delay(kAccPowerUpDelayMs);
 
     if (writeAccel(kAccPwrConf, 0x00U) != 0) {   // active（非 suspend）
-        return -1;
+        return false;
     }
     // 手册 p.45 §6 / p.46 Table 12：两次写访问之间至少留 2 µs（正常模式）/1000 µs（suspend）
     HAL_Delay(kWriteIdleDelayMs);
     if (writeAccel(kAccConf,
                    static_cast<uint8_t>(kAccConfBwpNormal |
                                         (cfg_.accel_odr & 0x0FU))) != 0) {
-        return -1;
+        return false;
     }
     HAL_Delay(kWriteIdleDelayMs);
     if (writeAccel(kAccRange, static_cast<uint8_t>(cfg_.accel_range)) != 0) {
-        return -1;
+        return false;
     }
 
     // 8) 陀螺仪软复位 + chip id 自检（陀螺没有 dummy 读问题，见手册 p.45 §6.1）
     if (writeGyro(kGyroSoftReset, kSoftResetCmd) != 0) {
-        return -1;
+        return false;
     }
     HAL_Delay(kGyroSoftResetDelayMs);
 
     if (readGyroId() != 0 || gyro_chip_id_ != kGyroChipIdValue) {
-        return -1;
+        return false;
     }
 
     // 9) 陀螺仪量程/带宽/功耗模式
     if (writeGyro(kGyroRange, static_cast<uint8_t>(cfg_.gyro_range)) != 0) {
-        return -1;
+        return false;
     }
     HAL_Delay(kWriteIdleDelayMs);   // 手册 p.46 Table 12：t_IDLE_wacc ≥ 2 µs
     if (writeGyro(kGyroBandwidth,
                   static_cast<uint8_t>(kGyroBwResetHi |               // 只读位，写 1 与复位值一致
                                        (cfg_.gyro_odr & kGyroBwMask))) != 0) {
-        return -1;
+        return false;
     }
     HAL_Delay(kWriteIdleDelayMs);
     if (writeGyro(kGyroLpm1, 0x00U) != 0) {      // normal mode（手册 p.40 §5.5.7：0x00=normal）
-        return -1;
+        return false;
     }
 
     // 10) 量程码 -> 灵敏度
-    const uint8_t acc_range = static_cast<uint8_t>(cfg_.accel_range);
-    const uint8_t gyr_range = static_cast<uint8_t>(cfg_.gyro_range);
-    if (acc_range > 3U || gyr_range > 4U) {
-        return -1;
-    }
     accel_lsb_per_g_ = kAccelLsbPerG[acc_range];
     gyro_lsb_per_dps_ = kGyroLsbPerDps[gyr_range];
 
-    // 清一次缓存，保证是从确定状态开始
-    data_ = ImuData{};
-
-
-    xfer_ = Xfer::Idle;
-    accel_done_ = false;
-    sample_ready_ = false;
-    g_active_imu = this;   // SPI DMA 完成中断的事件入口
-    setReady(true);
-    return 0;
+    g_active_imu = this;
+    return true;
 }
 
 // -------------------- 诊断 --------------------
@@ -412,106 +411,54 @@ bool Bmi088::dmaReady() const noexcept {
     return (hspi_ != nullptr) && (hspi_->hdmatx != nullptr) && (hspi_->hdmarx != nullptr);
 }
 
-// -------------------- 异步采样（DMA） --------------------
-//
-// 一次完整采样 = 两个 DMA 事务（两器片选独立，必须分两次），但**在同一拍内串联完成**：
-//   1) 加速度计：0x12 起连续 kAccTotal=20 字节，一次拿回加速度 0x12..0x17 与温度 0x22..0x23
-//      （中间 0x18..0x21 是保留字节，一并读回后丢弃）。
-//   2) 陀螺仪：0x02 起连续 kGyroTotal=7 字节（无 dummy）。
-// 加速度计事务一完成就在 HAL_SPI_TxRxCpltCallback 里立刻发起陀螺事务，不再是
-// 「这一拍等加速度计、下一拍才发陀螺仪」。SPI2 ≈2 MHz 下两笔合计 ~103 µs << 1 ms，
-// 所以每拍（1 kHz）都能拿到一帧新的加速度+角速度。
-//
-// 【片选与回调时机】HAL_SPI_TransmitReceive_DMA() 只负责把 DMA 挂上去就返回，此时末字节
-// 还在移位。核对过 stm32h7xx_hal_spi.c 的完成路径：
-//   SPI_DMATransmitReceiveCplt() 置 EOT 中断（3452-3453 行），
-//   SPI_IRQHandler() 在 EOT 分支里【先 SPI_CloseTransfer(hspi) 再置 HAL_SPI_STATE_READY
-//   再回调】（3037-3039 行）。
-// 因此在 TxRxCplt 回调里总线已关闭、末位已移出，释放片选/立刻发起下一笔事务都是安全的。
-//
-int8_t Bmi088::startReadAccel() noexcept {
-    g_tx_acc[0] = static_cast<uint8_t>(kAccData | 0x80U);   // 0x12 | 0x80 = 0x92
-    for (uint16_t i = 1U; i < kAccTotal; ++i) {
-        g_tx_acc[i] = 0U;   // 读操作，MOSI 全 0；g_rx_acc 由 DMA 覆盖，不必预清
-    }
-
-    xfer_start_tick_ = HAL_GetTick();
-    xfer_ = Xfer::Wait;
+// Each transaction holds its own CS through the SPI end-of-transfer interrupt.
+bool Bmi088::startReadAccel() noexcept {
+    g_tx_acc[0] = kAccData | 0x80U;
+    for (uint16_t i = 1; i < kAccTotal; ++i) g_tx_acc[i] = 0;
+    sample_time_ms_ = HAL_GetTick();
+    xfer_start_tick_ = sample_time_ms_;
+    xfer_ = Xfer::Accel;
     selectAccel();
-    const HAL_StatusTypeDef st =
-        HAL_SPI_TransmitReceive_DMA(hspi_, g_tx_acc, g_rx_acc, kAccTotal);
-    if (st != HAL_OK) {
-        // 启动失败必须立刻释放片选 —— 绝不能让 CS 悬在低电平，
-        // 否则后续任何一次陀螺事务都会被这颗器件当成"还在选中"而彻底错帧。
-        deselectAccel();
-        xfer_ = Xfer::Idle;
-        markFailed();
-        return -1;
-    }
-
-    return 0;
+    return HAL_SPI_TransmitReceive_DMA(hspi_, g_tx_acc, g_rx_acc, kAccTotal) == HAL_OK;
 }
 
-int8_t Bmi088::startReadGyro() noexcept {
-    g_tx_gyro[0] = static_cast<uint8_t>(kGyroData | 0x80U);   // 0x02 | 0x80 = 0x82
-    for (uint16_t i = 1U; i < kGyroTotal; ++i) {
-        g_tx_gyro[i] = 0U;
-    }
-
+bool Bmi088::startReadGyro() noexcept {
+    g_tx_gyro[0] = kGyroData | 0x80U;
+    for (uint16_t i = 1; i < kGyroTotal; ++i) g_tx_gyro[i] = 0;
     xfer_start_tick_ = HAL_GetTick();
+    xfer_ = Xfer::Gyro;
     selectGyro();
-    const HAL_StatusTypeDef st =
-        HAL_SPI_TransmitReceive_DMA(hspi_, g_tx_gyro, g_rx_gyro, kGyroTotal);
-    if (st != HAL_OK) {
-        deselectGyro();
-        return -1;
-    }
-
-    return 0;
+    return HAL_SPI_TransmitReceive_DMA(hspi_, g_tx_gyro, g_rx_gyro, kGyroTotal) == HAL_OK;
 }
 
-void Bmi088::On_Spi_Complete(SPI_HandleTypeDef *hspi) noexcept {
-    if ((hspi == nullptr) || (hspi != hspi_) || (xfer_ != Xfer::Wait) || sample_ready_) {
+void Bmi088::onComplete() noexcept {
+    // HAL closes the transaction and sets READY before dispatching EOT.
+    if (hspi_->State != HAL_SPI_STATE_READY) return;
+    if (HAL_GetTick() - xfer_start_tick_ > cfg_.xfer_timeout_ms) {
+        onError();
         return;
     }
-
-    if (!accel_done_) {
-        // 加速度计事务完成：释放片选后立刻串上陀螺仪事务（同一拍内完成）
+    if (xfer_ == Xfer::Accel) {
         deselectAccel();
-        accel_done_ = true;
-        if (startReadGyro() != 0) {
-            deselectGyro();
-            markFailed();
-            accel_done_ = false;
-            xfer_ = Xfer::Idle;
-        }
-        return;
+        if (!startReadGyro()) onError();
+    } else if (xfer_ == Xfer::Gyro) {
+        deselectGyro();
+        xfer_ = Xfer::Complete;
     }
-
-    // 陀螺仪事务完成：这里只打标记。解析与提交留给 Process()（TIM13 上下文），
-    // 避免在优先级更高的 SPI/DMA 中断里改 data_、与控制环抢同一份缓存。
-    deselectGyro();
-    sample_ready_ = true;
 }
 
-void Bmi088::On_Spi_Error(SPI_HandleTypeDef *hspi) noexcept {
-    if ((hspi == nullptr) || (hspi != hspi_)) {
-        return;
+void Bmi088::onError() noexcept {
+    if (xfer_ == Xfer::Accel || xfer_ == Xfer::Gyro) {
+        deselectAccel();
+        deselectGyro();
+        xfer_ = Xfer::Recovering;
     }
-    // HAL 在回调前已经结束本次传输（状态回 READY），这里只清本驱动的状态，
-    // 真正的总线自愈由下一拍 Process() 的超时分支（HAL_SPI_Abort）负责。
-    deselectAccel();
-    deselectGyro();
-    markFailed();
-    accel_done_ = false;
-    sample_ready_ = false;
-    xfer_ = Xfer::Idle;
 }
 
-void Bmi088::parseAccel() noexcept {
+void Bmi088::parseAccel(ImuFeedback &sample) const noexcept {
     // g_rx_acc 布局：0=地址回读, 1=dummy, 2..7=ACC_X/Y/Z(0x12..0x17), 8..17=保留, 18..19=TEMP(0x22..0x23)
     for (uint8_t i = 0U; i < 3U; ++i) {
-        pending_.accel_m_s2[i] =
+        sample.accel_m_s2[i] =
             static_cast<float>(toInt16Le(&g_rx_acc[2U + 2U * i])) * (9.80665f / accel_lsb_per_g_);
     }
 
@@ -527,67 +474,70 @@ void Bmi088::parseAccel() noexcept {
     const int16_t temp_i11 = (temp_u11 > 1023U)
                                  ? static_cast<int16_t>(temp_u11 - 2048U)
                                  : static_cast<int16_t>(temp_u11);
-    pending_.temperature_c =
+    sample.temperature_c =
         static_cast<float>(temp_i11) * kTempLsbPerDegC + kTempOffsetDegC;
 }
 
-void Bmi088::parseGyro() noexcept {
+void Bmi088::parseGyro(ImuFeedback &sample) const noexcept {
     // g_rx_gyro 布局：0=地址回读, 1..6=GYRO_X/Y/Z(0x02..0x07)
     for (uint8_t i = 0U; i < 3U; ++i) {
-        pending_.gyro_deg_s[i] =
-            static_cast<float>(toInt16Le(&g_rx_gyro[1U + 2U * i])) / gyro_lsb_per_dps_;
+        sample.gyro_rad_s[i] =
+            static_cast<float>(toInt16Le(&g_rx_gyro[1U + 2U * i])) *
+            (std::numbers::pi_v<float> / (180.0f * gyro_lsb_per_dps_));
     }
 }
 
 // -------------------- 基类接口：异步采样 --------------------
 
-int8_t Bmi088::Start() {
-    if (!Is_Ready() || hspi_ == nullptr) {
-        return 0;   // 未初始化：静默不启动（上层看的是 Is_Online()）
-    }
-    if (!dmaReady()) {
-        markFailed();
-        return -1;
-    }
-
-    // 上一拍的事务还没被 Process() 收走（主循环卡住 / 本拍调用过密）：
-    // 直接忽略本次启动，不打断在途事务，也不排队。
-    if (xfer_ != Xfer::Idle) {
-        return 0;
-    }
-
-    pending_ = ImuData{};   // 只在 Idle 且即将发起新事务时清零，保证不会清掉半成品
-    return startReadAccel();
+StartResult Bmi088::start() {
+    if (g_active_imu != this || !dmaReady()) return StartResult::Error;
+    if (xfer_ != Xfer::Idle) return StartResult::Skipped;
+    if (startReadAccel()) return StartResult::Started;
+    onError();
+    return StartResult::Error;
 }
 
-int8_t Bmi088::Process() {
-    if (!Is_Ready() || hspi_ == nullptr) {
-        return 0;
+ProcessResult Bmi088::process() {
+    if (g_active_imu != this) return ProcessResult::Error;
+    {
+        IrqGuard guard;
+        if ((xfer_ == Xfer::Accel || xfer_ == Xfer::Gyro) &&
+            HAL_GetTick() - xfer_start_tick_ > cfg_.xfer_timeout_ms) {
+            xfer_ = Xfer::Recovering;
+        }
+        if (xfer_ != Xfer::Recovering && xfer_ != Xfer::Complete) {
+            return ProcessResult::Pending;
+        }
     }
 
-    // 陀螺事务已在 SPI 中断里链式完成：本拍（TIM13 上下文）解析并提交，
-    // 与 1 kHz 控制同拍、不会撕裂 data_。每拍最多提交一帧。
-    if (sample_ready_) {
-        sample_ready_ = false;
-        accel_done_ = false;
-        parseAccel();
-        parseGyro();
-        markUpdated(pending_);
-        xfer_ = Xfer::Idle;
-        return 1;
-    }
-
-    // 事务在途：回调链没走完（DMA 异常/中断被长时间屏蔽）时才判超时并自愈。
-    if ((xfer_ == Xfer::Wait) &&
-        ((HAL_GetTick() - xfer_start_tick_) > cfg_.xfer_timeout_ms)) {
-        (void)HAL_SPI_Abort(hspi_);   // 把 HAL 内部状态强制拉回 READY，否则 SPI 永久 BUSY
+    if (xfer_ == Xfer::Recovering) {
+        // Keep starts and completion callbacks gated until HAL stops DMA and clears EOT.
+        const auto status = HAL_SPI_Abort(hspi_);
         deselectAccel();
         deselectGyro();
-        markFailed();
-        xfer_ = Xfer::Idle;
-        accel_done_ = false;
-        return -1;
+        // HAL may have closed SPI on error before aborting its second DMA stream.
+        for (auto *stream : {hspi_->hdmarx, hspi_->hdmatx}) {
+            if (HAL_DMA_GetState(stream) == HAL_DMA_STATE_BUSY) {
+                (void)HAL_DMA_Abort(stream);
+            }
+        }
+        if (status == HAL_OK &&
+            HAL_DMA_GetState(hspi_->hdmarx) == HAL_DMA_STATE_READY &&
+            HAL_DMA_GetState(hspi_->hdmatx) == HAL_DMA_STATE_READY) {
+            xfer_ = Xfer::Idle;
+        }
+        return ProcessResult::Error;
     }
 
-    return 0;   // 空闲或仍在传输
+    if (g_rx_acc[18] == kTempMsbInvalid) {
+        xfer_ = Xfer::Idle;
+        return ProcessResult::Error;
+    }
+    ImuFeedback sample{};
+    sample.sample_time_ms = sample_time_ms_;
+    parseAccel(sample);
+    parseGyro(sample);
+    publish(sample);
+    xfer_ = Xfer::Idle;
+    return ProcessResult::Updated;
 }

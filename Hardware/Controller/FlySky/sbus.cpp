@@ -30,34 +30,33 @@ RAM_D2_SECTION uint8_t Sbus::s_rx_buf_[Sbus::kRxBufSize];
 // ===========================================================================
 namespace {
 Sbus* active_receiver = nullptr; // one board DMA receive buffer
+}
 
-void rx_trampoline(void *ctx, UART_HandleTypeDef *huart, std::uint16_t size) noexcept {
+void Sbus::rx_trampoline(void *ctx, UART_HandleTypeDef *huart, std::uint16_t size) noexcept {
     static_cast<Sbus *>(ctx)->OnRxEvent(huart, size);
 }
 
-void error_trampoline(void *ctx, UART_HandleTypeDef *huart) noexcept {
+void Sbus::error_trampoline(void *ctx, UART_HandleTypeDef *huart) noexcept {
     static_cast<Sbus *>(ctx)->OnError(huart);
 }
 
-bool stale_trampoline(void *ctx, std::uint32_t now_ms) noexcept {
+bool Sbus::stale_trampoline(void *ctx, std::uint32_t now_ms) noexcept {
     return static_cast<Sbus *>(ctx)->Is_Stale(now_ms);
 }
 
-bool recover_trampoline(void *ctx, bool hard) noexcept {
+bool Sbus::recover_trampoline(void *ctx, bool hard) noexcept {
     Sbus *self = static_cast<Sbus *>(ctx);
     return hard ? self->Recover_Hard() : self->Recover_Soft();
 }
 
-}  // namespace
 
 // ===========================================================================
 // 生命周期
 // ===========================================================================
 
-Sbus::Sbus(UART_HandleTypeDef *huart) noexcept : huart_(huart) {
-    setRawRange(kRawMin, kRawMid, kRawMax);
+Sbus::Sbus(UART_HandleTypeDef *huart) noexcept : RcReceiver(kRawMin, kRawMid, kRawMax), huart_(huart) {
 
-    // Init() checks that this port can receive callbacks before arming DMA.
+    // init() checks that this port can receive callbacks before arming DMA.
     const int8_t id = uart_bsp::Register({huart_,
                                           this,
                                           rx_trampoline,
@@ -87,19 +86,19 @@ int8_t Sbus::arm() noexcept {
     return 0;
 }
 
-int8_t Sbus::Init() noexcept {
-    if (port_id_ == 0xff || (active_receiver && active_receiver != this)) return -1;
-    if (Is_Ready()) return 0;
+bool Sbus::init() noexcept {
+    if (port_id_ == 0xff || (active_receiver && active_receiver != this)) return false;
+    if (snapshot().ready) return true;
     active_receiver = this;
     if (arm() != 0) {
         active_receiver = nullptr;
-        return -1;
+        return false;
     }
     setReady(true);
     boot_tick_ = HAL_GetTick();
     // 诊断：上板时可直接在这里打断点确认优先级对不对
     // (HAL_NVIC_GetPriority(UART5_IRQn) 应为 5，DMA1_Stream0_IRQn 应为 5)
-    return 0;
+    return true;
 }
 
 // ===========================================================================
@@ -177,7 +176,7 @@ void Sbus::OnError(UART_HandleTypeDef *huart) noexcept {
     if ((code & HAL_UART_ERROR_DMA) != 0U) {
         ++dma_count_;
     }
-    countError();
+    ++error_count_;
 }
 
 // ===========================================================================
@@ -226,7 +225,8 @@ bool Sbus::Recover_Hard() noexcept {
 bool Sbus::Is_Stale(uint32_t now_ms) const noexcept {
     // 首次上电从未收到帧时，以最近一次 arm 的时刻作为起点；
     // 否则接收机静默时永远不进入恢复。
-    const uint32_t last = (Get_UpdateCount() > 0U) ? Get_LastUpdateTick() : boot_tick_;
+    const auto frame = snapshot();
+    const uint32_t last = frame.count ? frame.last_update_tick : boot_tick_;
     return (now_ms - last) >= kStaleMs;
 }
 

@@ -47,25 +47,9 @@
 //   byte24     : 0x00 帧尾
 //   通道值 172 = -100%，992 = 中位，1811 = +100%（标准量程）
 //
-// 注意：SBUS 帧永远是 16 个槽位。iA6B 刷 10 通道固件后 ch1..ch10 是实时值，
-//       ch11..ch16 由固件填充。所以 Get_ChannelCount() 返回 16，但本机只有
-//       前 10 路是有意义的。
-//
-// ---------------------------------------------------------------------------
-// 用法
-// ---------------------------------------------------------------------------
-//   static Sbus rc(&huart5);
-//   rc.Init();                       // 在 Gimbal_Init() 里调用
-//   // 任意位置（ISR 里也可，全是只读标量）：
-//   if (rc.Is_Online()) { float ch0 = rc.Get_Channel(0); }
-//   if (rc.Is_Failsafe()) { /* 遥控器失联，接收机进失控 */ }
-//   // 故障定时器里（任务上下文）：
-//   if (rc.Is_Stale(now)) { (void)rc.Recover_Soft(); }
-//
-// 上板验收清单：
-//   Get_UpdateCount() 以约 60~70/s 增长；Get_DecodeFailCount() 基本不涨；
-//   摇杆动作能反映到 Get_Channel(0..3)；拔掉信号线 Is_Online() 变 false 并自动恢复。
-//
+// snapshot().channels 保存一帧的 16 个原始槽位，前 10 路为此接收机的实时通道。
+// channel(0) 读取第一路的归一化值，snapshot().failsafe 读取帧内失控标志。
+
 #ifndef DM_02_BSP_SBUS_H
 #define DM_02_BSP_SBUS_H
 
@@ -76,6 +60,18 @@
 
 class Sbus final : public RcReceiver {
 public:
+    explicit Sbus(UART_HandleTypeDef *huart) noexcept;
+    Sbus(const Sbus&) = delete;
+    Sbus& operator=(const Sbus&) = delete;
+    ~Sbus() noexcept override;
+    bool init() noexcept override;
+
+private:
+    static void rx_trampoline(void *ctx, UART_HandleTypeDef *huart, std::uint16_t size) noexcept;
+    static void error_trampoline(void *ctx, UART_HandleTypeDef *huart) noexcept;
+    static bool stale_trampoline(void *ctx, std::uint32_t now_ms) noexcept;
+    static bool recover_trampoline(void *ctx, bool hard) noexcept;
+
     // -------------------- 协议常量 --------------------
     static constexpr uint8_t  kFrameSize = 25U;      ///< SBUS 定长帧
     static constexpr uint8_t  kHeader    = 0x0FU;    ///< byte0 帧头
@@ -93,19 +89,6 @@ public:
 
     /** 停帧判定门限：收到过帧后超过这么久没有新帧即认为接收停住 */
     static constexpr uint32_t kStaleMs = 500U;
-
-    /**
-     * @param huart 该 SBUS 所在的串口句柄（本工程为 &huart5）。
-     *              构造即注册进 uart_bsp 端口表（HAL 回调统一分发），
-     *              析构自动注销。注册失败或板载 DMA 缓冲已占用时 Init() 返回 -1。
-     */
-    explicit Sbus(UART_HandleTypeDef *huart) noexcept;
-    Sbus(const Sbus&) = delete;
-    Sbus& operator=(const Sbus&) = delete;
-    ~Sbus() noexcept override;
-
-    /** 挂载 DMA + IDLE 接收。0 = 成功；-1 = 失败（句柄为空或 HAL 返回非 OK） */
-    int8_t Init() noexcept override;
 
     // -------------------- HAL 回调入口（由 uart_bsp 的 trampoline 调用） --------------------
 
@@ -132,44 +115,12 @@ public:
      */
     bool Is_Stale(uint32_t now_ms) const noexcept;
 
-    /** 在 uart_bsp 端口表里的 id；0xFF = 未注册。 */
-    uint8_t Get_PortId() const noexcept { return port_id_; }
-
-    // -------------------- 诊断计数 --------------------
-
-    /** 帧头/帧尾校验失败（或收到短帧）的次数 */
-    uint32_t Get_DecodeFailCount() const noexcept { return decode_fail_; }
-
-    /** 重新挂载接收失败的次数 */
-    uint32_t Get_RearmFailCount() const noexcept { return rearm_fail_; }
-
-    /** 重新挂载接收成功的次数 */
-    uint32_t Get_RearmCount() const noexcept { return rearm_ok_; }
-
-    /** 恢复调用（Recover_Soft / Recover_Hard）成功的次数 */
-    uint32_t Get_RecoverCount() const noexcept { return recover_ok_; }
-
-    // 错误分类计数（来自 huart->ErrorCode，单次回调可能命中多个位）
-    /** 校验错 (PE) 次数 */
-    uint32_t Get_ParityErrorCount() const noexcept { return pe_count_; }
-    /** 噪声错 (NE) 次数 */
-    uint32_t Get_NoiseErrorCount() const noexcept { return ne_count_; }
-    /** 帧格式错 (FE) 次数 */
-    uint32_t Get_FrameErrorCount() const noexcept { return fe_count_; }
-    /** 溢出错 (ORE) 次数 */
-    uint32_t Get_OverrunErrorCount() const noexcept { return ore_count_; }
-    /** DMA 传输错次数 */
-    uint32_t Get_DmaErrorCount() const noexcept { return dma_count_; }
-
-    // -------------------- 纯函数（便于主机端单元测试） --------------------
-
     /**
      * 把一帧 25 字节 SBUS 数据解成 16 个 11 bit 通道值。
      * 只做位解包，不校验帧头/帧尾。
      */
     static void Decode(const uint8_t *frame, uint16_t *out) noexcept;
 
-private:
     int8_t arm() noexcept;
 
     UART_HandleTypeDef *huart_ = nullptr;   ///< 本实例占用的串口句柄
@@ -180,6 +131,7 @@ private:
     uint32_t recover_ok_  = 0U;             ///< 恢复成功计数
     uint32_t boot_tick_   = 0U;             ///< 最近一次 Init/arm 的时刻（首帧超时基准）
 
+    uint32_t error_count_{};
     uint32_t pe_count_  = 0U;               ///< UART_ERROR_PE
     uint32_t ne_count_  = 0U;               ///< UART_ERROR_NE
     uint32_t fe_count_  = 0U;               ///< UART_ERROR_FE

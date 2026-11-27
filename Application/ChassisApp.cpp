@@ -7,6 +7,7 @@
 #include "m3508.hpp"
 #include "sbus.h"
 #include "OmniChassis.hpp"
+#include "Gimbal_Controller.hpp"
 #include "PowerLimit/PowerLimit.hpp"
 #include "RobotMessage.hpp"
 #include "btb_service.hpp"
@@ -19,6 +20,7 @@ struct Devices {
     M3508 back_right_motor{&hfdcan1, 3};
     Dm4310 yaw_motor{&hfdcan2, 0x10, 0x20};
     OmniChassis chassis{front_left_motor, back_left_motor, back_right_motor, front_right_motor, {1, 1, 1, 1}};
+    Gimbal_Controller controller{chassis, yaw_motor};
     GimbalCommandMessage gimbal_cmd{GimbalCommandCanId, {}};
     BtbService gimbal_service{hfdcan2, gimbal_cmd};
 };
@@ -45,7 +47,9 @@ bool ChassisApp::Init() {
 }
 
 void ChassisApp::Loop() {
-
+    auto& d = devices();
+    constexpr std::uint32_t command_timeout_ms = 100;
+    d.controller.loop(d.gimbal_service.online(command_timeout_ms) ? d.gimbal_cmd.value() : Ctrl_By_Gimbal{});
 }
 
 void ChassisApp::Tick() {

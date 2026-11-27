@@ -2,6 +2,7 @@
 #define DM_02_BSP_RC_SNAPSHOT_H
 
 #include <cstdint>
+#include <cstddef>
 
 /** 单帧遥控快照，无 HAL 依赖，通道号为 0 基。 */
 struct RcSnapshot {
@@ -17,7 +18,7 @@ struct RcSnapshot {
     bool frame_lost = false;
 
     /** 归一化到 -1~+1，中位 0，带死区；通道非法返回 0。 */
-    float Normalised(std::uint8_t ch, float deadband = 0.01f) const noexcept {
+    float Normalised(std::size_t ch, float deadband = 0.01f) const noexcept {
         if (ch >= count || ch >= 16U || !(raw_min < raw_mid && raw_mid < raw_max)) {
             return 0.0f;
         }

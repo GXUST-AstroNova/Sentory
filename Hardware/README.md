@@ -40,7 +40,11 @@ bool sendJointTorque(float joint_nm) {
 
 ## 传感器
 
-BMI088 使用 SPI2 DMA。初始化后用 `Start()` 发起采样，`Process() == 1` 表示已提交新帧。`Get_Data()` 返回值快照，其中 `gyro_deg_s` 供 Fusion 使用，`gyroRadS()` 返回同一帧的 rad/s 值，`accel_m_s2` 和 `temperature_c` 分别使用 m/s² 和 °C。FlySky SBUS 在 UART5 上使用 DMA，`Get_Snapshot()` 读取通道、丢帧和失控状态。
+用 `Bmi088 imu(&hspi2)` 构造板载 IMU，也可传入第二个参数 `Bmi088::Config`。上电调用 `imu.init()`，成功返回 `true`。节拍中调用 `imu.start()`，上一帧仍在传输或等待提交时返回 `StartResult::Skipped`。SPI2 DMA 串联读取加速度、温度和角速度，主循环调用 `imu.process()`，仅 `ProcessResult::Updated` 表示发布了一帧新数据。
+
+`imu.feedback()` 按值返回传感器原生 XYZ 轴序的完整快照。加速度 `accel_m_s2` 使用 m/s²，角速度 `gyro_rad_s` 使用 rad/s，温度 `temperature_c` 使用 °C。首帧前 `valid` 为假，每次成功发布更新 `sequence` 和 `last_update_ms`。传输失败时可继续读取上一帧。`imu.online(timeout_ms)` 检查已发布帧的年龄，默认有效期为 100 ms，含边界。
+
+FlySky SBUS 在 UART5 上使用 DMA，`snapshot()` 按值读取同一帧的全部原始通道、丢帧和失控标志，`channel(index)` 按 0 基下标读取归一化至 [-1, 1] 的单通道值。
 
 ## 验证
 

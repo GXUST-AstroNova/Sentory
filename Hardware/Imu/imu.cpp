@@ -1,24 +1,20 @@
 #include "imu.hpp"
 #include "irq_guard.hpp"
 
-ImuData Imu::Get_Data() const noexcept {
+ImuFeedback Imu::feedback() const noexcept {
     IrqGuard guard;
-    return data_;
+    return feedback_;
 }
 
-bool Imu::Is_Online(uint32_t timeout_ms) const noexcept {
+bool Imu::online(std::uint32_t timeout_ms) const noexcept {
     IrqGuard guard;
-    return update_count_ && HAL_GetTick() - last_update_tick_ <= timeout_ms;
+    return feedback_.valid && HAL_GetTick() - feedback_.last_update_ms <= timeout_ms;
 }
 
-void Imu::markUpdated(const ImuData& sample) noexcept {
+void Imu::publish(ImuFeedback sample) noexcept {
     IrqGuard guard;
-    data_ = sample;
-    last_update_tick_ = HAL_GetTick();
-    ++update_count_;
-}
-
-void Imu::markFailed() noexcept {
-    IrqGuard guard;
-    ++refresh_errors_;
+    sample.last_update_ms = HAL_GetTick();
+    sample.sequence = feedback_.sequence + 1U;
+    sample.valid = true;
+    feedback_ = sample;
 }

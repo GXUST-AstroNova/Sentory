@@ -2,37 +2,34 @@
 
 #include <array>
 #include <cstdint>
-#include <numbers>
 
-struct ImuData {
+enum class StartResult { Started, Skipped, Error };
+enum class ProcessResult { Updated, Pending, Error };
+
+struct ImuFeedback {
     std::array<float, 3> accel_m_s2{};
-    std::array<float, 3> gyro_deg_s{};
+    std::array<float, 3> gyro_rad_s{};
     float temperature_c{};
-
-    [[nodiscard]] std::array<float, 3> gyroRadS() const noexcept {
-        constexpr float scale = std::numbers::pi_v<float> / 180.0f;
-        return {gyro_deg_s[0] * scale, gyro_deg_s[1] * scale, gyro_deg_s[2] * scale};
-    }
+    std::uint32_t last_update_ms{};
+    std::uint32_t sequence{};
+    bool valid{};
+    std::uint32_t sample_time_ms{}; // HAL tick at acquisition start, before DMA and publication.
 };
 
 class Imu {
 public:
     virtual ~Imu() = default;
-    virtual int8_t Init() = 0;
-    virtual int8_t Start() = 0;
-    virtual int8_t Process() = 0;   // 1 = new complete sample, 0 = pending, -1 = error
+    virtual bool init() = 0;
+    virtual StartResult start() = 0;
+    virtual ProcessResult process() = 0;
 
-    ImuData Get_Data() const noexcept;
-    bool Is_Ready() const noexcept { return ready_; }
-    bool Is_Online(uint32_t timeout_ms = 100) const noexcept;
-    uint32_t Get_LastUpdateTick() const noexcept { return last_update_tick_; }
-    uint32_t Get_UpdateCount() const noexcept { return update_count_; }
-    uint32_t Get_RefreshErrors() const noexcept { return refresh_errors_; }
+    [[nodiscard]] ImuFeedback feedback() const noexcept;
+    static constexpr std::uint32_t default_timeout_ms = 100;
+    [[nodiscard]] bool online(std::uint32_t timeout_ms = default_timeout_ms) const noexcept;
+
 protected:
-    void setReady(bool value) noexcept { ready_ = value; }
-    void markUpdated(const ImuData& sample) noexcept;
-    void markFailed() noexcept;
-    ImuData data_{};
-    uint32_t last_update_tick_{}, update_count_{}, refresh_errors_{};
-    bool ready_{};
+    void publish(ImuFeedback sample) noexcept;
+
+private:
+    ImuFeedback feedback_{};
 };

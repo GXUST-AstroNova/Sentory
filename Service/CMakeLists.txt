@@ -1,4 +1,6 @@
 add_subdirectory(Btb)
 add_subdirectory(Chassis)
+add_subdirectory(Gimbal)
+add_subdirectory(Fusion_Service)
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE BoardConfig/BootConfig.cpp BoardConfig/BoardConfigCodec.cpp vofa.cpp PowerLimit/PowerLimit.cpp)
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
