@@ -25,6 +25,8 @@ public:
                             DmCanMode mode = DmCanMode::BusDefault) noexcept;
     // Convenience for models constructed with both IDs.
     [[nodiscard]] bool init(DmCanMode mode = DmCanMode::BusDefault) noexcept;
+    // Permanently suppress new TX frames from this instance; feedback remains active.
+    void setObserveOnly() noexcept;
     bool enable() noexcept override;
     bool disable() noexcept override;
     bool clearFault() noexcept;
@@ -71,5 +73,6 @@ private:
     motor_can::Payload payload_{};
     float last_position_rad_{};
     bool enabled_{};
+    bool observe_only_{};
 };
 

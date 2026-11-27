@@ -5,6 +5,7 @@
 #include "usart.h"
 #include "vofa.h"
 #include "sbus.h"
+#include "main.h"
 #include "RobotMessage.hpp"
 #include "btb_message.hpp"
 #include "btb_service.hpp"
@@ -17,6 +18,8 @@ namespace {
 struct Devices {
     vofa debug{&huart1};
     Sbus receiver{&huart5};
+    Dm4310 pitch_motor{&hfdcan1,0x15,0x25};
+    Dm4310 yaw_motor{&hfdcan2,0x10,0x20};
     GimbalCommandMessage gimbal_cmd{GimbalCommandCanId, {}};
     BtbService gimbal_service{hfdcan2, gimbal_cmd};
 };

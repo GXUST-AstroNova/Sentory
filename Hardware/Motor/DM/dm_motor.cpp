@@ -75,7 +75,14 @@ DmMotor::~DmMotor() {
     if (registration_) *registration_ = {};
 }
 
+void DmMotor::setObserveOnly() noexcept {
+    IrqGuard guard;
+    observe_only_ = true;
+    enabled_ = false;
+}
+
 bool DmMotor::specialCommand(uint8_t opcode) noexcept {
+    if (observe_only_) return false;
     motor_can::Payload bytes{};
     bytes.fill(0xff);
     bytes.back() = opcode;
@@ -110,14 +117,14 @@ bool DmMotor::setMit(const MitTarget& target) noexcept {
         !std::isfinite(target.kp) || !std::isfinite(target.kd) ||
         !std::isfinite(target.torque_ff_nm)) return false;
     IrqGuard guard;
-    if (!registration_) return false;
+    if (!registration_ || observe_only_) return false;
     return cacheTarget(target, torque_limit_);
 }
 
 bool DmMotor::setTorqueLimit(float limit_nm) noexcept {
     if (!std::isfinite(limit_nm) || limit_nm < 0 || limit_nm > t_max_) return false;
     IrqGuard guard;
-    return registration_ && cacheTarget(target_, limit_nm);
+    return registration_ && !observe_only_ && cacheTarget(target_, limit_nm);
 }
 
 bool DmMotor::cacheTarget(const MitTarget& target, float limit_nm) noexcept {
@@ -143,7 +150,7 @@ SendResult DmMotor::sendAll() noexcept {
     for (const auto& entry : motors_) {
         IrqGuard guard;
         auto* motor = entry.motor;
-        if (!motor || !motor->enabled_) continue;
+        if (!motor || motor->observe_only_ || !motor->enabled_) continue;
         ++result.attempted_frames;
         result.queued_frames += motor_can::enqueue(motor->bus_, entry.command_id, motor->payload_, entry.fd_brs);
     }

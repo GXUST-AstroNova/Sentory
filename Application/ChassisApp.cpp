@@ -17,6 +17,7 @@ struct Devices {
     M3508 front_right_motor{&hfdcan1, 2};
     M3508 back_left_motor{&hfdcan1, 4};
     M3508 back_right_motor{&hfdcan1, 3};
+    Dm4310 yaw_motor{&hfdcan2, 0x10, 0x20};
     OmniChassis chassis{front_left_motor, back_left_motor, back_right_motor, front_right_motor, {1, 1, 1, 1}};
     GimbalCommandMessage gimbal_cmd{GimbalCommandCanId, {}};
     BtbService gimbal_service{hfdcan2, gimbal_cmd};
@@ -37,6 +38,8 @@ bool ChassisApp::Init() {
         !d.back_right_motor.init() || !d.front_right_motor.init()) {
         return false;
     }
+    d.yaw_motor.setObserveOnly();
+    if (!d.yaw_motor.init()) return false;
     d.chassis.Init();
     return d.gimbal_service.init();
 }
