@@ -22,7 +22,7 @@ Sentory 是基于 STM32H723VGT6 的嵌入式机器人固件工程。外设初始
 | --- | --- |
 | 主控 | STM32H723VGT6，Cortex-M7；CubeMX 配置系统时钟为 550 MHz。 |
 | FDCAN1 / FDCAN3 | 配置为经典 CAN，1 Mbps；应用示例启动两条总线。 |
-| FDCAN2 | 配置为 CAN FD + BRS，仲裁段 1 Mbps、数据段 5 Mbps；应用示例使用该总线控制达妙电机。 |
+| FDCAN2 | 配置为 CAN FD + BRS，仲裁段 1 Mbps、数据段 5 Mbps；应用示例用于板间通信，并注册只读观察模式的达妙电机。 |
 | BMI088 | 提供驱动；SPI2 配置为主机并使用收发 DMA，配置了加速度计和陀螺仪片选及中断引脚。 |
 | W25Q Flash | 提供驱动；OCTOSPI2 配置为四线模式。 |
 | 遥控器 | 提供 FlySky SBUS 接收支持；UART5 配置为 100000 baud、偶校验、2 位停止位，并配置接收 DMA。 |
@@ -31,6 +31,7 @@ Sentory 是基于 STM32H723VGT6 的嵌入式机器人固件工程。外设初始
 | USB | CubeMX 配置了 USB Device CDC 和全速设备接口。 |
 
 具体引脚、参数及启动方式以 [CubeMX 配置](Dm_02_Bsp_V2.ioc)、生成代码和各模块文档为准；电机总线细节见 [硬件接口说明](Hardware/README.md)。
+
 ## 环境准备
 
 - Git（包含子模块支持）
